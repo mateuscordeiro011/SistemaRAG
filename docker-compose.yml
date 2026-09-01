@@ -1,0 +1,88 @@
+services:
+  # ============================================
+  # MySQL Database (Vector + Relational Storage)
+  # ============================================
+  db:
+    image: mysql:8.0
+    container_name: rag_mysql_db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${DB_NAME:-rag_system_db}
+      MYSQL_USER: ${DB_USER:-rag_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-rag_password}
+      MYSQL_ALLOW_EMPTY_PASSWORD: "false"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+      interval: 10s
+    networks:
+      - rag_network
+    restart: unless-stopped
+
+  # ============================================
+  # FastAPI Backend (Core AI & RAG Engine)
+  # ============================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rag_fastapi_backend
+    environment:
+      DATABASE_URL: mysql+pymysql://${DB_USER:-rag_user}:${DB_PASSWORD:-rag_password}@db:3306/${DB_NAME:-rag_system_db}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      PYTHONUNBUFFERED: 1
+      APP_ENV: ${APP_ENV:-development}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - rag_network
+    restart: unless-stopped
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ============================================
+  # React Frontend (Human-in-the-Loop Dashboard)
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rag_react_frontend
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:8000}
+      REACT_APP_ENV: ${APP_ENV:-development}
+    ports:
+      - "3000:3000"
+    #volumes:
+    #  - ./frontend:/app
+    #  - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - rag_network
+    restart: unless-stopped
+    command: npm start
+
+# ============================================
+# Volumes & Networks
+# ============================================
+volumes:
+  mysql_data:
+    driver: local
+  uploads:
+    driver: local
+
+networks:
+  rag_network:
+    driver: bridge

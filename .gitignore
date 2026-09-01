@@ -1,0 +1,50 @@
+# ==========================================
+# AMBIENTE E CREDENCIAIS (NUNCA SUBIR)
+# ==========================================
+.env
+.env.local
+.env.development
+.env.production
+**/.env
+**/.env.*
+
+# ==========================================
+# PYTHON / BACKEND
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+uploads/
+logs/
+
+# ==========================================
+# NODE / FRONTEND
+# ==========================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+build/
+dist/
+
+# ==========================================
+# DOCKER
+# ==========================================
+.dockerignore
+
+# ==========================================
+# EDITORES DE CÓDIGO E SISTEMA
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
