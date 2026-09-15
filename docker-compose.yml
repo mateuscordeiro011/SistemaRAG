@@ -7,7 +7,7 @@ services:
     container_name: rag_mysql_db
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_password}
-      MYSQL_DATABASE: ${DB_NAME:-rag_system_db}
+      MYSQL_DATABASE: ${DB_NAME:-sistema_rag}
       MYSQL_USER: ${DB_USER:-rag_user}
       MYSQL_PASSWORD: ${DB_PASSWORD:-rag_password}
       MYSQL_ALLOW_EMPTY_PASSWORD: "false"
@@ -15,7 +15,7 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/01-init.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       timeout: 20s
@@ -34,10 +34,11 @@ services:
       dockerfile: Dockerfile
     container_name: rag_fastapi_backend
     environment:
-      DATABASE_URL: mysql+pymysql://${DB_USER:-rag_user}:${DB_PASSWORD:-rag_password}@db:3306/${DB_NAME:-rag_system_db}
+      DATABASE_URL: mysql+pymysql://${DB_USER:-rag_user}:${DB_PASSWORD:-rag_password}@db:3306/${DB_NAME:-sistema_rag}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       PYTHONUNBUFFERED: 1
       APP_ENV: ${APP_ENV:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}
     ports:
       - "8000:8000"
     volumes:
@@ -64,9 +65,6 @@ services:
       REACT_APP_ENV: ${APP_ENV:-development}
     ports:
       - "3000:3000"
-    #volumes:
-    #  - ./frontend:/app
-    #  - /app/node_modules
     depends_on:
       - backend
     networks:
