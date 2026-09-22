@@ -10,12 +10,11 @@ import {
   Copy,
   Check,
   AlertCircle,
-  CheckCircle,
-  AlertTriangle,
-  Info,
+  CircleCheck,
+  CircleAlert,
   Terminal,
 } from 'lucide-react';
-import LogBadge from './LogBadge';
+import LogBadge from '../components/LogBadge';
 
 /**
  * Componente Logs.jsx - Sistema completo de visualização e filtragem de logs
