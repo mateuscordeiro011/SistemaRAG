@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "mysql+pymysql://rag_user:rag_password@localhost:3306/rag_system_db"
+    "mysql+pymysql://rag_user:rag_password@db:3306/sistema_rag"
 )
 
 # ============================================
