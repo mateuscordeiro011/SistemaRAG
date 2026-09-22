@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, CheckCircle, AlertTriangle, Info, Eye } from 'lucide-react';
+import { AlertCircle, CircleCheck, CircleAlert, Terminal } from 'lucide-react';
 
 /**
  * Componente LogBadge - Exibe status de severidade do log com visual profissional
@@ -12,7 +12,7 @@ import { AlertCircle, CheckCircle, AlertTriangle, Info, Eye } from 'lucide-react
 export default function LogBadge({ level = 'info', text = '', size = 'md' }) {
   const badgeConfig = {
     error: {
-      icon: AlertCircle,
+      icon: CircleAlert,
       bgColor: 'bg-red-500/10 dark:bg-red-900/20',
       textColor: 'text-red-700 dark:text-red-400',
       borderColor: 'border-red-200 dark:border-red-800',
@@ -20,7 +20,7 @@ export default function LogBadge({ level = 'info', text = '', size = 'md' }) {
       emoji: '🔴',
     },
     success: {
-      icon: CheckCircle,
+      icon: CircleCheck,
       bgColor: 'bg-emerald-500/10 dark:bg-emerald-900/20',
       textColor: 'text-emerald-700 dark:text-emerald-400',
       borderColor: 'border-emerald-200 dark:border-emerald-800',
@@ -28,7 +28,7 @@ export default function LogBadge({ level = 'info', text = '', size = 'md' }) {
       emoji: '✅',
     },
     warning: {
-      icon: AlertTriangle,
+      icon: AlertCircle,
       bgColor: 'bg-amber-500/10 dark:bg-amber-900/20',
       textColor: 'text-amber-700 dark:text-amber-400',
       borderColor: 'border-amber-200 dark:border-amber-800',
@@ -36,7 +36,7 @@ export default function LogBadge({ level = 'info', text = '', size = 'md' }) {
       emoji: '🟡',
     },
     info: {
-      icon: Info,
+      icon: Terminal,
       bgColor: 'bg-blue-500/10 dark:bg-blue-900/20',
       textColor: 'text-blue-700 dark:text-blue-400',
       borderColor: 'border-blue-200 dark:border-blue-800',

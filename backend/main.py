@@ -1060,6 +1060,103 @@ async def relatorio_diario(
 
 
 # ============================================
+# DELETE & CLEANUP ENDPOINTS
+# ============================================
+
+@app.delete("/clientes/{cliente_id}")
+async def deletar_cliente(
+    cliente_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Remove um cliente e todos os seus dados associados (cascata).
+    """
+    cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
+    if not cliente:
+        raise HTTPException(status_code=404, detail="Cliente não encontrado")
+    
+    db.delete(cliente)
+    db.commit()
+    
+    logger.info(f"Cliente removido: {cliente.nome} (ID: {cliente_id})")
+    
+    return {"mensagem": "Cliente removido com sucesso", "cliente_id": cliente_id}
+
+
+@app.delete("/documentos/{documento_id}")
+async def deletar_documento(
+    documento_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Remove um documento e seus chunks/embeddings associados.
+    """
+    documento = db.query(Documento).filter(Documento.id == documento_id).first()
+    if not documento:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    
+    # Remover arquivo do disco se existir
+    try:
+        if os.path.exists(documento.caminho_arquivo):
+            os.remove(documento.caminho_arquivo)
+            logger.info(f"Arquivo removido: {documento.caminho_arquivo}")
+    except Exception as e:
+        logger.warning(f"Falha ao remover arquivo: {e}")
+    
+    db.delete(documento)
+    db.commit()
+    
+    logger.info(f"Documento removido: {documento.nome_arquivo} (ID: {documento_id})")
+    
+    return {"mensagem": "Documento removido com sucesso", "documento_id": documento_id}
+
+
+@app.delete("/mensagens/{mensagem_id}")
+async def deletar_mensagem(
+    mensagem_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Remove uma mensagem de atendimento e suas auditorias associadas.
+    """
+    mensagem = db.query(MensagemAtendimento).filter(MensagemAtendimento.id == mensagem_id).first()
+    if not mensagem:
+        raise HTTPException(status_code=404, detail="Mensagem não encontrada")
+    
+    db.delete(mensagem)
+    db.commit()
+    
+    logger.info(f"Mensagem removida: ID {mensagem_id}")
+    
+    return {"mensagem": "Mensagem removida com sucesso", "mensagem_id": mensagem_id}
+
+
+@app.delete("/logs")
+async def limpar_logs_antigos(
+    dias: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db)
+):
+    """
+    Limpa logs de auditoria mais antigos que N dias.
+    """
+    data_corte = datetime.utcnow() - timedelta(days=dias)
+    
+    registros_afetados = db.query(Auditoria).filter(
+        Auditoria.data_acao < data_corte
+    ).delete(synchronize_session=False)
+    
+    db.commit()
+    
+    logger.info(f"Logs antigos removidos: {registros_afetados} registros (anteriores a {data_corte})")
+    
+    return {
+        "mensagem": f"Limpeza concluída: {registros_afetados} registros removidos",
+        "registros_removidos": registros_afetados,
+        "data_corte": data_corte.isoformat()
+    }
+
+
+# ============================================
 # ERROR HANDLERS
 # ============================================
 
