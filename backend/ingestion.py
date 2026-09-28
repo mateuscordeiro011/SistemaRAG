@@ -1,572 +1,327 @@
-# ============================================
-# DOCUMENT INGESTION & PROCESSING PIPELINE
-# ============================================
-# Responsável por:
-# 1. Upload seguro de arquivos
-# 2. Extração de texto (PDF, DOCX, XLSX, TXT)
-# 3. Fragmentação em chunks com overlap
-# 4. Geração de embeddings vetoriais
-# 5. Persistência em banco de dados
+"""
+Módulo de ingestão de documentos para SistemaRAG
+Processa documentos, extrai chunks e gera embeddings
+"""
 
-import os
-import hashlib
 import logging
-from pathlib import Path
-from typing import Tuple, List, Optional
-from datetime import datetime
-import pickle
-
 import numpy as np
+from pathlib import Path
+from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 
-# Document parsing
-from pypdf import PdfReader
-from docx import Document as DocxDocument
-from openpyxl import load_workbook
-
-# Embeddings
-from openai import OpenAI
-
-# Database
-from models import Documento, Chunk, Embedding, Cliente
-from database import get_db_session
+from models import Chunk, MidiaDocumento, RespostaChunk
+from utils.embedding_client import embedding_client
+from utils.text_splitter import split_text_into_chunks
 
 logger = logging.getLogger(__name__)
 
-# ============================================
-# CONSTANTS & CONFIGURATION
-# ============================================
 
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 1000))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 200))
-ALLOWED_FILE_TYPES = os.getenv("ALLOWED_FILE_TYPES", "pdf,docx,xlsx,txt,doc,xls").split(",")
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE_MB", 50)) * 1024 * 1024
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-ada-002")
-
-# Criar diretório de uploads se não existir
-Path(UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-
-# Cliente OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# ============================================
-# FILE VALIDATION
-# ============================================
-
-def validate_file(
-    filename: str,
-    file_size: int
-) -> Tuple[bool, str]:
-    """
-    Valida nome e tamanho do arquivo antes do upload.
-    
-    Args:
-        filename: Nome do arquivo
-        file_size: Tamanho em bytes
-        
-    Returns:
-        (is_valid, error_message)
-    """
-    # Validar extensão
-    file_ext = filename.lower().split(".")[-1]
-    if file_ext not in ALLOWED_FILE_TYPES:
-        return False, f"Tipo de arquivo não permitido: .{file_ext}"
-    
-    # Validar tamanho
-    if file_size > MAX_FILE_SIZE:
-        max_mb = MAX_FILE_SIZE / (1024 * 1024)
-        return False, f"Arquivo excede o limite de {max_mb}MB"
-    
-    return True, ""
-
-
-def calculate_file_hash(file_path: str) -> str:
-    """
-    Calcula SHA-256 do arquivo para evitar duplicatas.
-    """
-    sha256 = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            sha256.update(chunk)
-    return sha256.hexdigest()
-
-
-# ============================================
-# TEXT EXTRACTION BY FILE TYPE
-# ============================================
-
-def extract_text_from_pdf(file_path: str) -> Tuple[str, int]:
-    """
-    Extrai texto de arquivo PDF.
-    
-    Returns:
-        (texto_completo, numero_paginas)
-    """
-    try:
-        logger.info(f"Extracting text from PDF: {file_path}")
-        reader = PdfReader(file_path)
-        text_parts = []
-        
-        for page_num, page in enumerate(reader.pages):
-            try:
-                text = page.extract_text()
-                if text:
-                    # Adicionar marcador de página para tracking
-                    text_parts.append(f"[PAGE {page_num + 1}]\n{text}")
-            except Exception as e:
-                logger.warning(f"Failed to extract text from page {page_num + 1}: {e}")
-        
-        full_text = "\n".join(text_parts)
-        num_pages = len(reader.pages)
-        
-        logger.info(f"Extracted {len(full_text)} characters from {num_pages} pages")
-        return full_text, num_pages
-        
-    except Exception as e:
-        logger.error(f"Error extracting PDF text: {e}")
-        raise
-
-
-def extract_text_from_docx(file_path: str) -> Tuple[str, int]:
-    """
-    Extrai texto de arquivo DOCX (Word).
-    
-    Returns:
-        (texto_completo, numero_paragrafos)
-    """
-    try:
-        logger.info(f"Extracting text from DOCX: {file_path}")
-        doc = DocxDocument(file_path)
-        text_parts = []
-        
-        for para_num, para in enumerate(doc.paragraphs):
-            if para.text.strip():
-                text_parts.append(para.text)
-        
-        # Tabelas também
-        for table in doc.tables:
-            table_text = []
-            for row in table.rows:
-                row_data = [cell.text for cell in row.cells]
-                table_text.append(" | ".join(row_data))
-            text_parts.append("\n".join(table_text))
-        
-        full_text = "\n".join(text_parts)
-        num_paragraphs = len(doc.paragraphs)
-        
-        logger.info(f"Extracted {len(full_text)} characters from {num_paragraphs} paragraphs")
-        return full_text, num_paragraphs
-        
-    except Exception as e:
-        logger.error(f"Error extracting DOCX text: {e}")
-        raise
-
-
-def extract_text_from_xlsx(file_path: str) -> Tuple[str, int]:
-    """
-    Extrai texto de arquivo XLSX (Excel).
-    Inclui nome da aba, cabeçalhos e dados.
-    
-    Returns:
-        (texto_completo, numero_linhas)
-    """
-    try:
-        logger.info(f"Extracting text from XLSX: {file_path}")
-        workbook = load_workbook(file_path)
-        text_parts = []
-        total_rows = 0
-        
-        for sheet_name in workbook.sheetnames:
-            sheet = workbook[sheet_name]
-            text_parts.append(f"[SHEET: {sheet_name}]")
-            
-            # Extrair dados em formato tabular
-            for row in sheet.iter_rows(values_only=True):
-                if any(cell is not None for cell in row):
-                    # Filtrar e formatar células
-                    row_data = [str(cell) if cell is not None else "" for cell in row]
-                    text_parts.append(" | ".join(row_data))
-                    total_rows += 1
-            
-            text_parts.append("")  # Separador entre abas
-        
-        full_text = "\n".join(text_parts)
-        
-        logger.info(f"Extracted {len(full_text)} characters from {total_rows} rows")
-        return full_text, total_rows
-        
-    except Exception as e:
-        logger.error(f"Error extracting XLSX text: {e}")
-        raise
-
-
-def extract_text_from_txt(file_path: str) -> Tuple[str, int]:
-    """
-    Lê arquivo TXT simples.
-    
-    Returns:
-        (texto_completo, numero_linhas)
-    """
-    try:
-        logger.info(f"Extracting text from TXT: {file_path}")
-        with open(file_path, "r", encoding="utf-8") as f:
-            text = f.read()
-        
-        num_lines = len(text.split("\n"))
-        
-        logger.info(f"Extracted {len(text)} characters from {num_lines} lines")
-        return text, num_lines
-        
-    except Exception as e:
-        logger.error(f"Error extracting TXT text: {e}")
-        raise
-
-
-def extract_text(file_path: str, file_type: str) -> Tuple[str, int]:
-    """
-    Dispatcher para extrair texto baseado no tipo de arquivo.
-    """
-    file_type_lower = file_type.lower()
-    
-    if file_type_lower == "pdf":
-        return extract_text_from_pdf(file_path)
-    elif file_type_lower in ["docx", "doc"]:
-        return extract_text_from_docx(file_path)
-    elif file_type_lower in ["xlsx", "xls"]:
-        return extract_text_from_xlsx(file_path)
-    elif file_type_lower == "txt":
-        return extract_text_from_txt(file_path)
-    else:
-        raise ValueError(f"Unsupported file type: {file_type}")
-
-
-# ============================================
-# TEXT CHUNKING
-# ============================================
-
-def create_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    """
-    Fragmenta texto em chunks com overlap.
-    Estratégia: dividir por caracteres com sobreposição para preservar contexto.
-    
-    Args:
-        text: Texto completo
-        chunk_size: Tamanho de cada chunk em caracteres
-        overlap: Número de caracteres sobrepostos entre chunks
-        
-    Returns:
-        Lista de chunks
-    """
-    if len(text) <= chunk_size:
-        return [text]
-    
-    chunks = []
-    start = 0
-    
-    while start < len(text):
-        # Calcular fim do chunk
-        end = min(start + chunk_size, len(text))
-        
-        # Tentar quebrar em espaço/nova linha para não cortar palavras
-        if end < len(text):
-            # Procurar última quebra de linha antes do fim
-            last_newline = text.rfind("\n", start, end)
-            if last_newline > start:
-                end = last_newline + 1
-            else:
-                # Procurar último espaço
-                last_space = text.rfind(" ", start, end)
-                if last_space > start:
-                    end = last_space + 1
-        
-        chunk = text[start:end].strip()
-        if chunk:  # Ignorar chunks vazios
-            chunks.append(chunk)
-        
-        # Mover start para próximo chunk com overlap
-        start = end - overlap
-    
-    logger.info(f"Created {len(chunks)} chunks from text")
-    return chunks
-
-
-# ============================================
-# EMBEDDING GENERATION
-# ============================================
-
-def generate_embeddings_batch(texts: List[str], model: str = EMBEDDING_MODEL) -> List[np.ndarray]:
-    """
-    Gera embeddings para uma lista de textos usando OpenAI API.
-    Agrupa em batches para economizar tempo/custo.
-    
-    Args:
-        texts: Lista de textos para gerar embeddings
-        model: Modelo de embedding (padrão: text-embedding-ada-002)
-        
-    Returns:
-        Lista de arrays numpy com embeddings
-    """
-    if not texts:
-        return []
-    
-    try:
-        logger.info(f"Generating embeddings for {len(texts)} texts using {model}")
-        
-        # OpenAI recomenda não enviar mais de 2048 textos por requisição
-        batch_size = 2048
-        all_embeddings = []
-        
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            
-            response = client.embeddings.create(
-                input=batch,
-                model=model
-            )
-            
-            # Extrair embeddings da resposta
-            for item in response.data:
-                embedding = np.array(item.embedding, dtype=np.float32)
-                all_embeddings.append(embedding)
-            
-            logger.info(f"Generated embeddings batch {i//batch_size + 1}")
-        
-        logger.info(f"Successfully generated {len(all_embeddings)} embeddings")
-        return all_embeddings
-        
-    except Exception as e:
-        logger.error(f"Error generating embeddings: {e}")
-        raise
-
-
-# ============================================
-# DATABASE PERSISTENCE
-# ============================================
-
-def save_document_to_db(
-    db: Session,
-    cliente_id: int,
-    file_path: str,
-    filename: str,
-    file_type: str,
-    conteudo_texto: str,
-    hash_arquivo: str,
-    tamanho_bytes: int
-) -> Documento:
-    """
-    Salva metadados do documento no banco de dados.
-    """
-    documento = Documento(
-        cliente_id=cliente_id,
-        nome_arquivo=filename,
-        tipo_arquivo=file_type.upper(),
-        caminho_arquivo=file_path,
-        tamanho_bytes=tamanho_bytes,
-        hash_arquivo=hash_arquivo,
-        conteudo_texto=conteudo_texto,
-        status="PROCESSANDO"
-    )
-    db.add(documento)
-    db.commit()
-    db.refresh(documento)
-    
-    logger.info(f"Documento {documento.id} salvo no banco de dados")
-    return documento
-
-
-def save_chunks_to_db(
-    db: Session,
+async def processar_documento(
     documento_id: int,
-    chunks: List[str],
-    page_info: Optional[dict] = None
-) -> List[Chunk]:
-    """
-    Salva chunks no banco de dados.
-    """
-    chunk_objects = []
-    
-    for numero, conteudo in enumerate(chunks):
-        pagina = None
-        if page_info and numero in page_info:
-            pagina = page_info[numero]
-        
-        chunk = Chunk(
-            documento_id=documento_id,
-            numero_chunk=numero,
-            conteudo=conteudo,
-            tamanho_caracteres=len(conteudo),
-            pagina=pagina
-        )
-        chunk_objects.append(chunk)
-    
-    db.bulk_save_objects(chunk_objects)
-    db.commit()
-    
-    logger.info(f"Salvos {len(chunk_objects)} chunks para documento {documento_id}")
-    return chunk_objects
-
-
-def save_embeddings_to_db(
-    db: Session,
-    chunks: List[Chunk],
-    embeddings: List[np.ndarray],
-    modelo: str = EMBEDDING_MODEL
-) -> int:
-    """
-    Salva embeddings (vetores) no banco de dados.
-    Embeddings são serializados como pickle em BLOB.
-    """
-    embedding_objects = []
-    
-    for chunk, embedding in zip(chunks, embeddings):
-        # Serializar embedding como pickle
-        embedding_pickle = pickle.dumps(embedding)
-        
-        embedding_obj = Embedding(
-            chunk_id=chunk.id,
-            vetor=embedding_pickle,
-            dimensao=len(embedding),
-            modelo=modelo
-        )
-        embedding_objects.append(embedding_obj)
-    
-    db.bulk_save_objects(embedding_objects)
-    db.commit()
-    
-    logger.info(f"Salvos {len(embedding_objects)} embeddings")
-    return len(embedding_objects)
-
-
-def mark_document_complete(db: Session, documento_id: int, total_chunks: int, total_embeddings: int):
-    """
-    Marca documento como processado com sucesso.
-    """
-    documento = db.query(Documento).filter(Documento.id == documento_id).first()
-    if documento:
-        documento.status = "SUCESSO"
-        documento.data_processamento = datetime.utcnow()
-        documento.total_chunks = total_chunks
-        documento.total_embeddings = total_embeddings
-        db.commit()
-        logger.info(f"Documento {documento_id} marcado como SUCESSO")
-
-
-def mark_document_error(db: Session, documento_id: int, error_message: str):
-    """
-    Marca documento como com erro.
-    """
-    documento = db.query(Documento).filter(Documento.id == documento_id).first()
-    if documento:
-        documento.status = "ERRO"
-        documento.mensagem_erro = error_message
-        db.commit()
-        logger.error(f"Documento {documento_id} marcado como ERRO: {error_message}")
-
-
-# ============================================
-# MAIN INGESTION PIPELINE
-# ============================================
-
-def process_document(
+    caminho_arquivo: str,
     cliente_id: int,
-    file_path: str,
-    filename: str,
-    file_type: str
-) -> Tuple[bool, str, Optional[Documento]]:
+    db: Session,
+    tamanho_chunk: int = 512,
+    sobreposicao: int = 50,
+) -> dict:
     """
-    Pipeline completo de processamento de documento:
-    1. Extração de texto
-    2. Criação de chunks
-    3. Geração de embeddings
-    4. Persistência em banco de dados
+    Processa um documento completo: extração, chunking e embedding
+    
+    Args:
+        documento_id: ID do documento no banco
+        caminho_arquivo: Caminho para o arquivo
+        cliente_id: ID do cliente proprietário
+        db: Sessão SQLAlchemy
+        tamanho_chunk: Tokens por chunk
+        sobreposicao: Tokens de sobreposição entre chunks
     
     Returns:
-        (sucesso, mensagem, documento)
+        Dict com estatísticas de processamento
     """
-    documento = None
-    
     try:
-        logger.info(f"Starting document processing: {filename}")
+        # 1. Extrair texto do arquivo
+        logger.info(f"Iniciando processamento documento {documento_id}")
+        texto_completo = _extrair_texto_arquivo(caminho_arquivo)
         
-        with get_db_session() as db:
-            # 1. Validar cliente existe
-            cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
-            if not cliente:
-                return False, f"Cliente {cliente_id} não encontrado", None
-            
-            # 2. Calcular hash e verificar duplicata
-            hash_arquivo = calculate_file_hash(file_path)
-            existing = db.query(Documento).filter(
-                Documento.hash_arquivo == hash_arquivo
-            ).first()
-            if existing:
-                logger.warning(f"Documento duplicado detectado: {hash_arquivo}")
-                return False, "Este documento já foi processado", None
-            
-            # 3. Obter tamanho do arquivo
-            tamanho_bytes = os.path.getsize(file_path)
-            
-            # 4. Extrair texto
-            try:
-                conteudo_texto, num_pages = extract_text(file_path, file_type)
-                if len(conteudo_texto.strip()) < 100:
-                    return False, "Documento contém texto insuficiente", None
-            except Exception as e:
-                return False, f"Erro ao extrair texto: {str(e)}", None
-            
-            # 5. Salvar documento no BD (status PROCESSANDO)
-            documento = save_document_to_db(
-                db, cliente_id, file_path, filename, file_type,
-                conteudo_texto, hash_arquivo, tamanho_bytes
+        if not texto_completo or len(texto_completo.strip()) == 0:
+            raise ValueError("Arquivo vazio ou sem conteúdo textual")
+        
+        # 2. Dividir em chunks
+        chunks_texto = split_text_into_chunks(
+            texto_completo,
+            chunk_size=tamanho_chunk,
+            overlap=sobreposicao
+        )
+        
+        if not chunks_texto:
+            raise ValueError("Falha ao dividir documento em chunks")
+        
+        logger.info(f"Documento dividido em {len(chunks_texto)} chunks")
+        
+        # 3. Gerar embeddings
+        embeddings = await embedding_client.encode_batch(chunks_texto)
+        
+        # 4. Criar objetos Chunk
+        chunk_objects = []
+        for idx, (texto, embedding) in enumerate(zip(chunks_texto, embeddings)):
+            chunk = Chunk(
+                cliente_id=cliente_id,
+                midia_documento_id=documento_id,
+                numero_pagina=_estimar_pagina(texto_completo, texto),
+                conteudo_texto=texto,
+                tamanho_token=len(texto.split()),  # Aproximado
+                hash_conteudo=_gerar_hash(texto),
             )
-            documento_id = documento.id
+            chunk_objects.append((chunk, embedding))
         
-        # 6. Fragmentar texto
-        chunks = create_chunks(conteudo_texto)
+        # ✅ CRÍTICO: Salvar chunks primeiro e sincronizar IDs
+        db.bulk_save_objects([c[0] for c in chunk_objects])
+        db.flush()  # ✅ Sincronizar IDs gerados do banco de volta aos objetos
         
-        # 7. Gerar embeddings
-        embeddings = generate_embeddings_batch(chunks)
+        # Agora os chunk.id estão preenchidos!
         
-        if len(embeddings) != len(chunks):
-            raise ValueError("Número de embeddings não corresponde a chunks")
+        # 5. Salvar embeddings associados aos IDs dos chunks
+        _salvar_embeddings_banco(chunk_objects, db)
         
-        # 8. Salvar chunks e embeddings no BD
-        with get_db_session() as db:
-            chunk_objects = save_chunks_to_db(db, documento_id, chunks)
-            embeddings_count = save_embeddings_to_db(db, chunk_objects, embeddings)
-            mark_document_complete(db, documento_id, len(chunk_objects), embeddings_count)
-        
-        logger.info(f"Document processing completed successfully: {filename}")
-        return True, "Documento processado com sucesso", documento
-        
-    except Exception as e:
-        logger.error(f"Document processing failed: {e}")
+        # 6. Atualizar status do documento
+        documento = db.query(MidiaDocumento).filter_by(id=documento_id).first()
         if documento:
-            with get_db_session() as db:
-                mark_document_error(db, documento.id, str(e))
+            documento.status = 'INDEXADO'
+            db.add(documento)
         
-        return False, f"Erro ao processar documento: {str(e)}", documento
-
-
-def get_document_status(documento_id: int) -> dict:
-    """
-    Retorna status atual de um documento.
-    """
-    with get_db_session() as db:
-        documento = db.query(Documento).filter(Documento.id == documento_id).first()
-        if not documento:
-            return {"erro": "Documento não encontrado"}
+        db.commit()
+        
+        logger.info(f"Documento {documento_id} processado com sucesso")
         
         return {
-            "id": documento.id,
-            "nome": documento.nome_arquivo,
-            "status": documento.status,
-            "total_chunks": documento.total_chunks,
-            "total_embeddings": documento.total_embeddings,
-            "tamanho_bytes": documento.tamanho_bytes,
-            "data_upload": documento.data_upload.isoformat() if documento.data_upload else None,
-            "data_processamento": documento.data_processamento.isoformat() if documento.data_processamento else None,
-            "mensagem_erro": documento.mensagem_erro
+            "documento_id": documento_id,
+            "total_chunks": len(chunk_objects),
+            "total_embeddings": len(embeddings),
+            "status": "sucesso"
         }
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar documento {documento_id}: {str(e)}")
+        
+        # Marcar documento com erro
+        try:
+            documento = db.query(MidiaDocumento).filter_by(id=documento_id).first()
+            if documento:
+                documento.status = 'ERRO'
+                documento.mensagem_erro = str(e)[:500]
+                db.add(documento)
+            db.commit()
+        except:
+            pass
+        
+        raise
+
+
+def _extrair_texto_arquivo(caminho_arquivo: str) -> str:
+    """
+    Extrai texto de um arquivo (PDF, DOCX, TXT, MD)
+    
+    Args:
+        caminho_arquivo: Caminho para o arquivo
+    
+    Returns:
+        Texto extraído
+    """
+    ext = Path(caminho_arquivo).suffix.lower()
+    texto = ""
+    
+    if ext == '.txt' or ext == '.md':
+        with open(caminho_arquivo, 'r', encoding='utf-8') as f:
+            texto = f.read()
+    
+    elif ext == '.pdf':
+        try:
+            import PyPDF2
+            with open(caminho_arquivo, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    texto += page.extract_text()
+        except ImportError:
+            logger.warning("PyPDF2 não instalado, usando fallback")
+            texto = _extrair_pdf_fallback(caminho_arquivo)
+    
+    elif ext == '.docx':
+        try:
+            from docx import Document
+            doc = Document(caminho_arquivo)
+            for paragraph in doc.paragraphs:
+                texto += paragraph.text + "\n"
+        except ImportError:
+            logger.error("python-docx não instalado")
+            raise ValueError("Formato DOCX não suportado")
+    
+    else:
+        raise ValueError(f"Formato de arquivo não suportado: {ext}")
+    
+    return texto.strip()
+
+
+def _extrair_pdf_fallback(caminho_arquivo: str) -> str:
+    """Fallback para extração de PDF sem PyPDF2"""
+    import subprocess
+    
+    try:
+        # Usar pdftotext se disponível
+        resultado = subprocess.run(
+            ['pdftotext', caminho_arquivo, '-'],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        return resultado.stdout
+    except Exception as e:
+        logger.error(f"Falha em fallback PDF: {e}")
+        return ""
+
+
+def _salvar_embeddings_banco(chunk_embeddings: List[Tuple], db: Session):
+    """
+    Salva embeddings dos chunks no banco de dados
+    
+    ✅ IMPORTANTE: Só chama após db.flush() sincronizar os IDs!
+    
+    Args:
+        chunk_embeddings: Lista de tuplas (Chunk, embedding_array)
+        db: Sessão SQLAlchemy
+    """
+    for chunk, embedding in chunk_embeddings:
+        # ✅ Agora chunk.id está preenchido!
+        if not chunk.id:
+            logger.warning(f"Chunk sem ID! Pulando.")
+            continue
+        
+        # Converter embedding para bytes para armazenar
+        embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
+        
+        chunk.embedding_vector = embedding_bytes
+        db.add(chunk)
+    
+    db.commit()
+
+
+def _estimar_pagina(texto_completo: str, texto_chunk: str) -> Optional[int]:
+    """
+    Estima o número de página onde o chunk aparece
+    
+    Heurística simples: conta quebras de página aproximadas
+    """
+    pos = texto_completo.find(texto_chunk)
+    if pos < 0:
+        return None
+    
+    # Estimar 50 linhas por página
+    aprox_linhas = texto_completo[:pos].count('\n')
+    aprox_pagina = (aprox_linhas // 50) + 1
+    
+    return aprox_pagina
+
+
+def _gerar_hash(texto: str) -> str:
+    """
+    Gera hash SHA256 do texto para deduplicação
+    """
+    import hashlib
+    return hashlib.sha256(texto.encode()).hexdigest()
+
+
+async def processar_lote_documentos(
+    documento_ids: List[int],
+    cliente_id: int,
+    db: Session,
+) -> dict:
+    """
+    Processa um lote de documentos
+    
+    Args:
+        documento_ids: Lista de IDs de documentos
+        cliente_id: ID do cliente
+        db: Sessão SQLAlchemy
+    
+    Returns:
+        Estatísticas consolidadas
+    """
+    resultados = {
+        "total_processados": 0,
+        "total_sucesso": 0,
+        "total_erro": 0,
+        "documentos": []
+    }
+    
+    for doc_id in documento_ids:
+        try:
+            documento = db.query(MidiaDocumento).filter_by(
+                id=doc_id,
+                cliente_id=cliente_id
+            ).first()
+            
+            if not documento:
+                logger.warning(f"Documento {doc_id} não encontrado")
+                continue
+            
+            resultado = await processar_documento(
+                documento_id=doc_id,
+                caminho_arquivo=documento.caminho_arquivo,
+                cliente_id=cliente_id,
+                db=db
+            )
+            
+            resultados["total_sucesso"] += 1
+            resultados["documentos"].append(resultado)
+            
+        except Exception as e:
+            logger.error(f"Erro no documento {doc_id}: {e}")
+            resultados["total_erro"] += 1
+            resultados["documentos"].append({
+                "documento_id": doc_id,
+                "status": "erro",
+                "erro": str(e)
+            })
+        
+        resultados["total_processados"] += 1
+    
+    return resultados
+
+
+def deduplicar_chunks(cliente_id: int, db: Session) -> int:
+    """
+    Remove chunks duplicados (mesmo hash) mantendo o primeiro
+    
+    Args:
+        cliente_id: ID do cliente
+        db: Sessão SQLAlchemy
+    
+    Returns:
+        Número de chunks removidos
+    """
+    # Query para encontrar duplicatas
+    duplicatas = db.query(Chunk).filter(
+        and_(
+            Chunk.cliente_id == cliente_id,
+            Chunk.deletado == False
+        )
+    ).all()
+    
+    hashes_vistos = {}
+    ids_deletar = []
+    
+    for chunk in duplicatas:
+        if chunk.hash_conteudo in hashes_vistos:
+            ids_deletar.append(chunk.id)
+        else:
+            hashes_vistos[chunk.hash_conteudo] = chunk.id
+    
+    # Marcar como deletados
+    db.query(Chunk).filter(Chunk.id.in_(ids_deletar)).update(
+        {Chunk.deletado: True}
+    )
+    db.commit()
+    
+    logger.info(f"Removidas {len(ids_deletar)} duplicatas para cliente {cliente_id}")
+    
+    return len(ids_deletar)

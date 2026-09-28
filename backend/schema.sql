@@ -7,7 +7,7 @@
 -- - Embeddings vetoriais
 -- - Mensagens de atendimento com histórico
 
-USE rag_system_db;
+USE sistema_rag;
 
 -- ============================================
 -- 1. TABELA: CLIENTES (Tenants)

@@ -9,6 +9,9 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from contextlib import contextmanager
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from models import Base
 
@@ -58,7 +61,7 @@ SessionLocal = sessionmaker(
 # ============================================
 
 @event.listens_for(engine, "connect")
-def set_sqlite_pragma(dbapi_conn, connection_record):
+def configure_mysql_connection(dbapi_conn, connection_record):
     """
     Listener para configurações de conexão específicas do MySQL.
     """

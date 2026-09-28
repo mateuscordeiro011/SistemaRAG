@@ -25,6 +25,9 @@ from models import (
     Usuario, Auditoria
 )
 from database import SessionLocal, engine
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # ============================================
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "backend/uploads")
 REQUIRED_DIRECTORIES = [
@@ -40,8 +43,8 @@ REQUIRED_DIRECTORIES = [
     "backend/logs",
 ]
 
-# Cliente OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Cliente OpenAI (com fallback seguro para não travar na inicialização de módulos)
+client = OpenAI(api_key=OPENAI_API_KEY if OPENAI_API_KEY else "sk-dummy-key-for-init")
 
 # ============================================
 # DATABASE HEALTH CHECKS

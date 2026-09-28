@@ -7,7 +7,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 import asyncio
+import re
+import hashlib
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -411,39 +416,78 @@ async def upload_documento(
         if not cliente:
             raise HTTPException(status_code=404, detail="Cliente não encontrado")
         
-        # Validar arquivo
-        is_valid, error_msg = validate_file(file.filename, file.size)
+        # Validar arquivo com tamanho real
+        contents = await file.read()
+        file_size = len(contents)
+        
+        is_valid, error_msg = validate_file(file.filename, file_size)
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
         
-        # Salvar arquivo em disco
-        file_ext = file.filename.split(".")[-1].lower()
+        # Sanitizar nome de arquivo contra path traversal
+        raw_name = Path(file.filename).name
+        clean_filename = re.sub(r'[^\w\-_\.]', '_', raw_name)
+        if not clean_filename or clean_filename.startswith("."):
+            clean_filename = f"upload_{clean_filename}"
+            
+        file_ext = clean_filename.split(".")[-1].lower()
+        
+        # Calcular hash do arquivo para prevencao de duplicatas
+        file_hash = hashlib.sha256(contents).hexdigest()
+        existing_doc = db.query(Documento).filter(
+            Documento.cliente_id == cliente_id,
+            Documento.hash_arquivo == file_hash
+        ).first()
+        if existing_doc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Este arquivo já foi processado anteriormente (Documento #{existing_doc.id}, Status: {existing_doc.status})"
+            )
+        
+        # Salvar arquivo em disco de forma segura
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        safe_filename = f"{cliente_id}_{timestamp}_{file.filename}"
+        safe_filename = f"{cliente_id}_{timestamp}_{clean_filename}"
         file_path = os.path.join(UPLOAD_DIR, safe_filename)
         
-        contents = await file.read()
         with open(file_path, "wb") as f:
             f.write(contents)
         
-        logger.info(f"File uploaded: {safe_filename} ({len(contents)} bytes)")
+        logger.info(f"File uploaded safely: {safe_filename} ({file_size} bytes)")
         
-        # Iniciar processamento em background
+        # Criar registro de documento imediatamente para fornecer documento_id ao cliente
+        documento = Documento(
+            cliente_id=cliente_id,
+            nome_arquivo=clean_filename,
+            tipo_arquivo=file_ext.upper(),
+            caminho_arquivo=file_path,
+            tamanho_bytes=file_size,
+            hash_arquivo=file_hash,
+            status="PROCESSANDO"
+        )
+        db.add(documento)
+        db.commit()
+        db.refresh(documento)
+        
+        # Iniciar processamento em background vinculando ao documento_id gerado
         background_tasks.add_task(
             process_document,
             cliente_id=cliente_id,
             file_path=file_path,
-            filename=file.filename,
-            file_type=file_ext
+            filename=clean_filename,
+            file_type=file_ext,
+            documento_id=documento.id
         )
         
         return {
-            "mensagem": "Arquivo recebido. Processamento iniciado.",
-            "arquivo": file.filename,
-            "tamanho_bytes": len(contents),
-            "status": "processando"
+            "mensagem": "Arquivo recebido. Processamento iniciado com sucesso.",
+            "documento_id": documento.id,
+            "arquivo": clean_filename,
+            "tamanho_bytes": file_size,
+            "status": "PROCESSANDO"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
