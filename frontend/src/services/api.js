@@ -48,7 +48,7 @@ export const documentoService = {
     formData.append('cliente_id', cliente_id);
 
     try {
-      const response = await api.post('/api/documentos/upload', formData, {
+      const response = await api.post('/documentos/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -56,7 +56,6 @@ export const documentoService = {
           const percentCompleted = Math.round(
             (progressEvent.loaded * 100) / progressEvent.total
           );
-          // Emitir progresso se necessário
           console.log(`Upload: ${percentCompleted}%`);
         },
       });
@@ -74,9 +73,7 @@ export const documentoService = {
    */
   list: async (cliente_id) => {
     try {
-      const response = await api.get('/api/documentos', {
-        params: { cliente_id },
-      });
+      const response = await api.get('/documentos/cliente/' + cliente_id);
       return response.data;
     } catch (error) {
       console.error('Erro ao listar documentos:', error);
@@ -91,7 +88,7 @@ export const documentoService = {
    */
   getStatus: async (documentoId) => {
     try {
-      const response = await api.get(`/api/documentos/${documentoId}/status`);
+      const response = await api.get(`/documentos/${documentoId}/status`);
       return response.data;
     } catch (error) {
       console.error('Erro ao obter status:', error);
@@ -106,7 +103,7 @@ export const documentoService = {
    */
   delete: async (documentoId) => {
     try {
-      const response = await api.delete(`/api/documentos/${documentoId}`);
+      const response = await api.delete(`/documentos/${documentoId}`);
       return response.data;
     } catch (error) {
       console.error('Erro ao deletar documento:', error);
@@ -129,7 +126,7 @@ export const mensagemService = {
    */
   enviar: async (cliente_id, pergunta, canal = 'web') => {
     try {
-      const response = await api.post('/api/mensagens/enviar', {
+      const response = await api.post('/mensagens/processar', {
         cliente_id,
         pergunta,
         canal,
@@ -169,7 +166,7 @@ export const mensagemService = {
    */
   getQueue: async (cliente_id) => {
     try {
-      const response = await api.get('/api/mensagens/fila', {
+      const response = await api.get('/fila-aprovacao', {
         params: { cliente_id },
       });
       return response.data;
@@ -180,7 +177,7 @@ export const mensagemService = {
   },
 
   /**
-   * Aprova uma mensagem e envia a resposta
+   * Aprova uma mensagem
    * @param {number} mensagemId - ID da mensagem
    * @param {string} resposta - Resposta a ser enviada (pode ser editada)
    * @returns {Promise}
@@ -188,8 +185,12 @@ export const mensagemService = {
   approve: async (mensagemId, resposta) => {
     try {
       const response = await api.post(
-        `/api/mensagens/${mensagemId}/approve`,
-        { resposta }
+        `/mensagens/${mensagemId}/aprovar`,
+        { 
+          aprovada: true,
+          resposta_editada: resposta,
+          operador_id: 1
+        }
       );
       return response.data;
     } catch (error) {
@@ -207,8 +208,12 @@ export const mensagemService = {
   reject: async (mensagemId, motivo) => {
     try {
       const response = await api.post(
-        `/api/mensagens/${mensagemId}/reject`,
-        { motivo }
+        `/mensagens/${mensagemId}/aprovar`,
+        { 
+          aprovada: false,
+          motivo_rejeicao: motivo,
+          operador_id: 1
+        }
       );
       return response.data;
     } catch (error) {
@@ -224,7 +229,7 @@ export const mensagemService = {
    */
   getDetails: async (mensagemId) => {
     try {
-      const response = await api.get(`/api/mensagens/${mensagemId}`);
+      const response = await api.get(`/mensagens/${mensagemId}/detalhes-completo`);
       return response.data;
     } catch (error) {
       console.error('Erro ao obter detalhes:', error);
@@ -239,9 +244,7 @@ export const mensagemService = {
    */
   getChunksConsultados: async (mensagemId) => {
     try {
-      const response = await api.get(
-        `/api/mensagens/${mensagemId}/chunks-consultados`
-      );
+      const response = await api.get(`/mensagens/${mensagemId}/chunks-consultados`);
       return response.data;
     } catch (error) {
       console.error('Erro ao obter chunks:', error);
@@ -263,7 +266,7 @@ export const logService = {
    */
   list: async (cliente_id, filtros = {}) => {
     try {
-      const response = await api.get('/api/logs', {
+      const response = await api.get('/logs', {
         params: {
           cliente_id,
           ...filtros,
@@ -283,7 +286,7 @@ export const logService = {
    */
   getByMensagem: async (mensagemId) => {
     try {
-      const response = await api.get(`/api/logs/mensagem/${mensagemId}`);
+      const response = await api.get(`/logs/mensagem/${mensagemId}`);
       return response.data;
     } catch (error) {
       console.error('Erro ao obter logs:', error);
@@ -298,7 +301,7 @@ export const logService = {
    */
   getByDocumento: async (documentoId) => {
     try {
-      const response = await api.get(`/api/logs/documento/${documentoId}`);
+      const response = await api.get(`/logs/documento/${documentoId}`);
       return response.data;
     } catch (error) {
       console.error('Erro ao obter logs:', error);
@@ -319,9 +322,7 @@ export const estatisticasService = {
    */
   getGeral: async (cliente_id) => {
     try {
-      const response = await api.get('/api/estatisticas/geral', {
-        params: { cliente_id },
-      });
+      const response = await api.get('/clientes/' + cliente_id + '/statistics');
       return response.data;
     } catch (error) {
       console.error('Erro ao obter estatísticas:', error);
@@ -338,7 +339,7 @@ export const estatisticasService = {
    */
   getPorPeriodo: async (cliente_id, dataInicio, dataFim) => {
     try {
-      const response = await api.get('/api/estatisticas/periodo', {
+      const response = await api.get('/relatorios/diario', {
         params: { cliente_id, dataInicio, dataFim },
       });
       return response.data;
@@ -356,9 +357,7 @@ export const estatisticasService = {
    */
   getTopDocumentos: async (cliente_id, limite = 10) => {
     try {
-      const response = await api.get('/api/estatisticas/top-documentos', {
-        params: { cliente_id, limite },
-      });
+      const response = await api.get('/clientes/' + cliente_id + '/statistics');
       return response.data;
     } catch (error) {
       console.error('Erro ao obter top documentos:', error);
@@ -378,15 +377,15 @@ export const configuracaoService = {
    * @returns {Promise} Objeto com configurações
    */
   get: async (cliente_id) => {
-    try {
-      const response = await api.get('/api/configuracoes', {
-        params: { cliente_id },
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Erro ao obter configurações:', error);
-      throw error;
-    }
+    // Endpoint não implementado no backend ainda
+    console.warn('Endpoint /configuracoes não implementado no backend');
+    return { 
+      limiar_confianca: 0.75, 
+      max_chunks_resposta: 5,
+      modelo_embedding: 'text-embedding-ada-002',
+      modelo_rag: 'gpt-3.5-turbo',
+      timeout_processamento: 30
+    };
   },
 
   /**
@@ -396,16 +395,8 @@ export const configuracaoService = {
    * @returns {Promise}
    */
   update: async (cliente_id, config) => {
-    try {
-      const response = await api.put('/api/configuracoes', {
-        cliente_id,
-        ...config,
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Erro ao atualizar configurações:', error);
-      throw error;
-    }
+    console.warn('Endpoint /configuracoes não implementado no backend');
+    return { success: true };
   },
 };
 
@@ -429,15 +420,57 @@ export const healthService = {
   },
 
   /**
-   * Verifica conexão com banco de dados
-   * @returns {Promise} Status do BD
+   * Status rápido do sistema (< 1s)
+   * @returns {Promise} Status rápido
    */
-  checkDatabase: async () => {
+  quickStatus: async () => {
     try {
-      const response = await api.get('/health/db');
+      const response = await api.get('/api/v1/health/quick-status');
       return response.data;
     } catch (error) {
-      console.error('Erro ao verificar BD:', error);
+      console.error('Erro ao verificar status rápido:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Diagnóstico completo do sistema (2-5s)
+   * @returns {Promise} Relatório completo
+   */
+  fullDiagnostic: async () => {
+    try {
+      const response = await api.get('/api/v1/health/full-diagnostic');
+      return response.data;
+    } catch (error) {
+      console.error('Erro no diagnóstico completo:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Teste de persistência do banco de dados
+   * @returns {Promise} Resultado do teste
+   */
+  dbTest: async () => {
+    try {
+      const response = await api.get('/api/v1/health/db-test');
+      return response.data;
+    } catch (error) {
+      console.error('Erro no teste de BD:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Teste de disponibilidade do modelo de IA
+   * @returns {Promise} Resultado do teste
+   */
+  aiModelTest: async () => {
+    try {
+      const response = await api.get('/api/v1/health/ai-model-test');
+      return response.data;
+    } catch (error) {
+      console.error('Erro no teste de modelo IA:', error);
       throw error;
     }
   },

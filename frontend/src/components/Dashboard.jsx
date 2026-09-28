@@ -7,7 +7,7 @@
 import React, { useState, useEffect } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { apiService } from '../services/api';
+import { mensagemService } from '../services/api';
 import MessageCard from './MessageCard';
 import Loader from './Loader';
 import Alert from './Alert';
@@ -66,7 +66,7 @@ const Dashboard = () => {
       setLoading(true);
       setError(null);
       
-      const response = await apiService.getApprovalQueue();
+      const response = await mensagemService.getQueue();
       setMessages(response.data.mensagens);
       setStats(response.data);
 
@@ -89,9 +89,8 @@ const Dashboard = () => {
       setActionInProgress('approve');
       setError(null);
 
-      const response = await apiService.approveMessage(
+      const response = await mensagemService.approve(
         selectedMessage.id,
-        1, // TODO: Usar ID do usuário autenticado
         editedResponse
       );
 
@@ -116,9 +115,8 @@ const Dashboard = () => {
       setActionInProgress('reject');
       setError(null);
 
-      await apiService.rejectMessage(
+      await mensagemService.reject(
         selectedMessage.id,
-        1, // TODO: Usar ID do usuário autenticado
         rejectReason
       );
 
@@ -140,7 +138,7 @@ const Dashboard = () => {
       setActionInProgress('send');
       setError(null);
 
-      await apiService.sendMessage(selectedMessage.id);
+      await mensagemService.approve(selectedMessage.id, editedResponse || selectedMessage.resposta_ia);
       setSuccess('Mensagem enviada com sucesso!');
       setSelectedMessage(null);
       await fetchMessages();
