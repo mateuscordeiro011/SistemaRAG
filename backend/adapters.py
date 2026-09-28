@@ -315,11 +315,35 @@ class AdapterFactory:
     """
     
     _adapters = {
-        CanalEnum.WHATSAPP: WhatsAppAdapter(),
-        CanalEnum.EMAIL: EmailAdapter(),
+        CanalEnum.WHATSAPP: None,  # Will be initialized lazily
+        CanalEnum.EMAIL: None,
         CanalEnum.WEB: WebAdapter(),
         CanalEnum.TESTE: TesteAdapter(),
     }
+    
+    @classmethod
+    def _get_adapter(cls, canal: CanalEnum) -> CanalAdapter:
+        """Lazy initialization of adapters"""
+        if cls._adapters[canal] is None:
+            if canal == CanalEnum.WHATSAPP:
+                # Try Meta first, then Twilio
+                from integrations import MetaWhatsAppAdapter, TwilioWhatsAppAdapter
+                import os
+                if os.getenv("META_ACCESS_TOKEN") and os.getenv("META_PHONE_NUMBER_ID"):
+                    cls._adapters[canal] = MetaWhatsAppAdapter()
+                elif os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN"):
+                    cls._adapters[canal] = TwilioWhatsAppAdapter()
+                else:
+                    # Fallback to old adapter
+                    cls._adapters[canal] = WhatsAppAdapter()
+            elif canal == CanalEnum.EMAIL:
+                from integrations import SMTPEmailAdapter
+                import os
+                if os.getenv("SMTP_SERVER") and os.getenv("SMTP_USER"):
+                    cls._adapters[canal] = SMTPEmailAdapter()
+                else:
+                    cls._adapters[canal] = EmailAdapter()
+        return cls._adapters[canal]
     
     @classmethod
     def criar(cls, canal: str) -> CanalAdapter:
@@ -341,7 +365,7 @@ class AdapterFactory:
             logger.warning(f"Canal desconhecido: {canal}, usando padrão")
             return cls._adapters[CanalEnum.WEB]
         
-        return cls._adapters.get(enum_canal, cls._adapters[CanalEnum.WEB])
+        return cls._get_adapter(enum_canal)
     
     @classmethod
     def registrar(cls, canal: CanalEnum, adapter: CanalAdapter):

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, BackgroundTasks, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -31,6 +31,13 @@ from ingestion import (
 )
 from rag_engine import process_query, get_cliente_statistics
 from health import perform_full_health_check, get_quick_status
+from integrations import (
+    TwilioWhatsAppAdapter, 
+    MetaWhatsAppAdapter, 
+    OutlookAdapter, 
+    SMTPEmailAdapter,
+    AdapterFactory
+)
 
 # ============================================
 # LOGGING SETUP
@@ -950,9 +957,9 @@ async def enviar_mensagem(
     db: Session = Depends(get_db)
 ):
     """
-    Marca mensagem aprovada como enviada (simulação de envio via WhatsApp/Email).
+    Envia mensagem aprovada via canal apropriado (WhatsApp, Outlook, Email).
     
-    Em produção, isso dispararia webhooks reais para Meta Cloud API, Microsoft Graph, etc.
+    Usa o AdapterFactory para determinar o adaptador correto baseado no canal.
     """
     
     try:
@@ -969,33 +976,45 @@ async def enviar_mensagem(
                 detail=f"Apenas mensagens APROVADAS podem ser enviadas"
             )
         
-        # Atualizar status
-        mensagem.status = "ENVIADA"
-        mensagem.data_envio = datetime.utcnow()
+        # Determinar resposta a enviar (editada se houver, senão original)
+        resposta_final = mensagem.resposta_editada or mensagem.resposta_ia
         
-        # Registrar auditoria
-        auditoria = Auditoria(
-            mensagem_atendimento_id=mensagem_id,
-            acao="ENVIO",
-            descricao="Resposta enviada ao cliente"
-        )
-        db.add(auditoria)
-        db.commit()
+        if not resposta_final:
+            raise HTTPException(status_code=400, detail="Mensagem sem resposta para enviar")
         
-        logger.info(f"Mensagem {mensagem_id} marcada como enviada")
+        # Obter canal
+        canal = mensagem.canal
         
-        # TODO: Aqui seria disparado webhook para canal real
-        # - WhatsApp: POST to Meta Cloud API
-        # - Outlook: POST to Microsoft Graph API
-        # - Email: SMTP send
+        # Criar adapter apropriado
+        adapter = AdapterFactory.criar(canal)
         
-        return {
-            "sucesso": True,
-            "mensagem_id": mensagem_id,
-            "novo_status": "ENVIADA",
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        # Validar destinatário
+        destinatario = mensagem.identificador_externo or str(mensagem.cliente_id)
+        if not await adapter.validar_destinatario(destinatario):
+            logger.warning(f"Destinatário inválido para canal {canal}: {destinatario}")
         
+        # Enviar mensagem
+        sucesso = await adapter.enviar(mensagem, db)
+        
+        if sucesso:
+            # Status já atualizado pelo adapter
+            logger.info(f"Mensagem {mensagem_id} enviada via {canal}")
+            return {
+                "sucesso": True,
+                "mensagem_id": mensagem_id,
+                "novo_status": mensagem.status,
+                "canal": canal,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        else:
+            # Adapter já atualizou tentativas e status de erro
+            raise HTTPException(
+                status_code=500,
+                detail=f"Falha ao enviar via {canal}. Verifique logs."
+            )
+        
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Error sending message: {e}")
@@ -1219,6 +1238,222 @@ async def general_exception_handler(request, exc):
         status_code=500,
         content={"detail": "Erro interno do servidor"}
     )
+
+
+# ============================================
+# WEBHOOK ENDPOINTS
+# ============================================
+
+@app.post("/webhooks/whatsapp")
+async def whatsapp_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Webhook para receber mensagens do WhatsApp (Meta Cloud API).
+    
+    Processa a mensagem através do RAG e enfileira para aprovação.
+    """
+    try:
+        data = await request.json()
+        
+        # Verificar assinatura Meta (opcional, mas recomendado)
+        # if not verify_signature(request, META_WEBHOOK_VERIFY_TOKEN):
+        #     return {"error": "Invalid signature"}
+        
+        # Processar mensagens recebidas
+        meta_adapter = MetaWhatsAppAdapter()
+        messages = await meta_adapter.process_webhook(data)
+        
+        resultados = []
+        
+        for msg in messages:
+            # Extrair informações
+            wa_message_id = msg.get("id")
+            sender_number = msg.get("from")
+            texto = msg.get("text")
+            
+            if not texto:
+                continue  # Ignorar mensagens não-texto por enquanto
+            
+            # Buscar ou criar cliente pelo número
+            cliente = db.query(Cliente).filter(
+                Cliente.telefone == sender_number
+            ).first()
+            
+            if not cliente:
+                # Criar cliente temporário
+                cliente = Cliente(
+                    nome_cliente=f"WhatsApp User {sender_number[-4:]}",
+                    empresa="WhatsApp",
+                    descricao=f"Cliente via WhatsApp: {sender_number}",
+                    telefone=sender_number,
+                    ativo=True
+                )
+                db.add(cliente)
+                db.flush()
+            
+            # Processar através RAG
+            from rag_engine import process_query
+            resultado = process_query(db, cliente.id, texto, canal="whatsapp")
+            
+            # Enfileirar para aprovação
+            mensagem = MensagemAtendimento(
+                cliente_id=cliente.id,
+                canal="whatsapp",
+                identificador_externo=wa_message_id,
+                pergunta=texto,
+                resposta=resultado.get("resposta", "Erro ao processar"),
+                status="AGUARDANDO_APROVACAO",
+                score_relevancia=resultado.get("score_relevancia", 0),
+                tempo_processamento_ms=resultado.get("tempo_processamento_ms", 0),
+                custo_api=resultado.get("custo_api", 0)
+            )
+            db.add(mensagem)
+            
+            resultados.append({
+                "message_id": wa_message_id,
+                "cliente_id": cliente.id,
+                "status": "queued_for_approval"
+            })
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "processed": len(resultados),
+            "messages": resultados
+        }
+        
+    except Exception as e:
+        logger.error(f"WhatsApp webhook error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/webhooks/whatsapp")
+async def whatsapp_webhook_verify(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token")
+):
+    """
+    Verificação do webhook do WhatsApp (Meta).
+    
+    Meta envia esta requisição ao registrar o webhook.
+    """
+    meta_adapter = MetaWhatsAppAdapter()
+    challenge = await meta_adapter.verify_webhook(hub_mode, hub_verify_token, hub_challenge)
+    
+    if challenge:
+        return int(challenge)
+    return {"error": "Invalid verify token"}
+
+
+@app.post("/webhooks/outlook")
+async def outlook_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Webhook para receber notificações do Outlook (Microsoft Graph).
+    
+    Processa emails recebidos através do RAG e enfileira para aprovação.
+    """
+    try:
+        data = await request.json()
+        
+        # Microsoft envia validation token na primeira chamada
+        if 'validationToken' in data:
+            return data['validationToken']
+        
+        outlook_adapter = OutlookAdapter()
+        resultados = []
+        
+        for notification in data.get('value', []):
+            email_id = notification.get('resourceData', {}).get('id')
+            
+            if not email_id:
+                continue
+            
+            # Buscar email via Graph API
+            email_data = await outlook_adapter.fetch_email(email_id)
+            
+            if not email_data:
+                continue
+            
+            # Extrair informações
+            sender_email = email_data.get('from', {}).get('emailAddress', {}).get('address')
+            subject = email_data.get('subject', '')
+            body_preview = email_data.get('bodyPreview', '')
+            
+            # Combinar assunto e preview para a pergunta
+            pergunta = f"Assunto: {subject}\n\n{body_preview}"
+            
+            # Buscar ou criar cliente pelo email
+            cliente = db.query(Cliente).filter(
+                Cliente.email == sender_email
+            ).first()
+            
+            if not cliente:
+                cliente = Cliente(
+                    nome_cliente=f"Outlook User {sender_email.split('@')[0]}",
+                    empresa="Outlook",
+                    descricao=f"Cliente via Outlook: {sender_email}",
+                    email=sender_email,
+                    ativo=True
+                )
+                db.add(cliente)
+                db.flush()
+            
+            # Processar através RAG
+            from rag_engine import process_query
+            resultado = process_query(db, cliente.id, pergunta, canal="outlook")
+            
+            # Enfileirar para aprovação
+            mensagem = MensagemAtendimento(
+                cliente_id=cliente.id,
+                canal="outlook",
+                identificador_externo=email_id,
+                pergunta=pergunta,
+                resposta=resultado.get("resposta", "Erro ao processar"),
+                status="AGUARDANDO_APROVACAO",
+                score_relevancia=resultado.get("score_relevancia", 0),
+                tempo_processamento_ms=resultado.get("tempo_processamento_ms", 0),
+                custo_api=resultado.get("custo_api", 0)
+            )
+            db.add(mensagem)
+            
+            # Marcar email como lido
+            await outlook_adapter.mark_as_read(email_id)
+            
+            resultados.append({
+                "email_id": email_id,
+                "cliente_id": cliente.id,
+                "status": "queued_for_approval"
+            })
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "processed": len(resultados),
+            "messages": resultados
+        }
+        
+    except Exception as e:
+        logger.error(f"Outlook webhook error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/webhooks/outlook/subscription")
+async def create_outlook_subscription(
+    notification_url: str = Query(...),
+    expiration_minutes: int = Query(60)
+):
+    """
+    Cria subscription para receber notificações de novos emails no Outlook.
+    """
+    try:
+        outlook_adapter = OutlookAdapter()
+        result = await outlook_adapter.create_subscription(notification_url, expiration_minutes)
+        return result
+    except Exception as e:
+        logger.error(f"Create Outlook subscription error: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ============================================
