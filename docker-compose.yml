@@ -1,0 +1,227 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # BANCO DE DADOS MySQL
+  # ==========================================
+  mysql:
+    image: mysql:8.0
+    container_name: sistemarag_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123}
+      MYSQL_USER: ${MYSQL_USER:-admin}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-admin123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-sistema_rag}
+      TZ: America/Sao_Paulo
+    ports:
+      - "3306:3306"
+    volumes:
+      # ✅ Persistir dados do MySQL
+      - mysql_data:/var/lib/mysql
+      # ✅ Script de inicialização
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # ✅ Configurações customizadas
+      - ./config/mysql.cnf:/etc/mysql/conf.d/custom.cnf
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER:-admin}", "-p${MYSQL_PASSWORD:-admin123}"]
+      timeout: 20s
+      retries: 10
+      interval: 10s
+      start_period: 40s
+    networks:
+      - sistemarag_network
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================
+  # BACKEND - Python FastAPI
+  # ==========================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        PYTHON_VERSION: "3.9"
+    container_name: sistemarag_backend
+    environment:
+      # Banco de dados
+      DATABASE_URL: mysql://${MYSQL_USER:-admin}:${MYSQL_PASSWORD:-admin123}@mysql:3306/${MYSQL_DATABASE:-sistema_rag}
+      
+      # Twilio WhatsApp
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_WHATSAPP_NUMBER: ${TWILIO_WHATSAPP_NUMBER}
+      
+      # Email SMTP
+      SMTP_SERVER: ${SMTP_SERVER:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SENDER_EMAIL: ${SENDER_EMAIL}
+      SENDER_PASSWORD: ${SENDER_PASSWORD}
+      
+      # Segurança
+      SECRET_KEY: ${SECRET_KEY:-sua_chave_secreta_muito_longa_aqui}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      
+      # RAG Config
+      LIMIAR_CONFIANCA: ${LIMIAR_CONFIANCA:-0.75}
+      MAX_CHUNKS_RESPOSTA: ${MAX_CHUNKS_RESPOSTA:-5}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      
+      # Python
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+    
+    ports:
+      - "8000:8000"
+    
+    # ✅ Volumes para desenvolvimento
+    volumes:
+      # Código Python para edição durante desenvolvimento
+      - ./backend/app:/app/app
+      - ./backend/routers:/app/routers
+      - ./backend/models:/app/models
+      - ./backend/utils:/app/utils
+      - ./backend/integrations:/app/integrations
+      
+      # Uploads de arquivos
+      - uploads_data:/app/uploads
+      
+      # Logs
+      - backend_logs:/app/logs
+    
+    depends_on:
+      mysql:
+        condition: service_healthy
+    
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    
+    networks:
+      - sistemarag_network
+    
+    restart: unless-stopped
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      timeout: 10s
+      retries: 3
+      interval: 30s
+      start_period: 40s
+
+  # ==========================================
+  # FRONTEND - React
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sistemarag_frontend
+    
+    environment:
+      # ✅ URL do backend
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://backend:8000}
+      REACT_APP_ENV: ${REACT_APP_ENV:-development}
+      NODE_ENV: development
+    
+    ports:
+      - "3000:3000"
+    
+    # ✅ VOLUMES CRÍTICOS para hot-reload
+    volumes:
+      # Código React
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      
+      # Não sobrescrever node_modules
+      - /app/node_modules
+      - /app/build
+    
+    depends_on:
+      - backend
+    
+    command: npm start
+    
+    networks:
+      - sistemarag_network
+    
+    restart: unless-stopped
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==========================================
+  # REDIS (Opcional - Para fila de processamento)
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: sistemarag_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - sistemarag_network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 10s
+      retries: 3
+      interval: 30s
+    profiles:
+      - with-redis  # Opcional: docker-compose --profile with-redis up
+
+  # ==========================================
+  # PGADMIN (Opcional - Visualizar BD)
+  # ==========================================
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: sistemarag_phpmyadmin
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: ${MYSQL_USER:-admin}
+      PMA_PASSWORD: ${MYSQL_PASSWORD:-admin123}
+      PMA_DATABASE: ${MYSQL_DATABASE:-sistema_rag}
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql
+    networks:
+      - sistemarag_network
+    restart: unless-stopped
+    profiles:
+      - debug  # docker-compose --profile debug up
+
+# ==========================================
+# VOLUMES NOMEADOS
+# ==========================================
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+  backend_logs:
+    driver: local
+
+# ==========================================
+# NETWORKS
+# ==========================================
+networks:
+  sistemarag_network:
+    driver: bridge
