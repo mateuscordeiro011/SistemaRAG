@@ -19,10 +19,10 @@ import {
   Building2,
   FileText,
   Zap,
-  Brain,
+  BrainIcon as Brain,
   Clock,
-  TrendingUp,
   Users,
+  MailIcon as Mail,
 } from 'lucide-react';
 
 const Dashboard = ({ clienteId }) => {

@@ -14,6 +14,7 @@ import {
   Clock,
   ChevronDown,
   ChevronUp,
+  Mail,
 } from 'lucide-react';
 import { mensagemService } from '../services/api';
 import LogBadge from './LogBadge';

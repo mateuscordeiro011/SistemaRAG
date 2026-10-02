@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   XCircle,
   FileText,
-  ArrowUpTray,
   Database,
   Brain,
   Sparkles,

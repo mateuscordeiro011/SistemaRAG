@@ -18,9 +18,10 @@ import {
   FileText,
   Database,
   MessageSquare,
-  Smartphone,
   Mail,
   Zap,
+  Brain,
+  RefreshCw,
 } from 'lucide-react';
 import { logService } from '../services/api';
 
